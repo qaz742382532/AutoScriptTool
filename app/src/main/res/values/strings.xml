@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">自动脚本工具</string>
+    <string name="btn_open_script">开启脚本</string>
+    <string name="status_service_off">无障碍服务未开启</string>
+    <string name="status_service_on">无障碍服务已开启</string>
+    <string name="hint_open_accessibility">请开启无障碍服务以使用脚本功能</string>
+</resources>
