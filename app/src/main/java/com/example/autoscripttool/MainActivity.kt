@@ -102,11 +102,14 @@ class MainActivity : AppCompatActivity() {
     // ── 状态 ───────────────────────────────────────────────────
 
     private fun isAccessibilityServiceEnabled(): Boolean {
-        val service = "${packageName}/${AutoClickService::class.java.name}"
-        val enabledServices = Settings.Secure.getString(
+        // 两种格式都测：完整类名 + 简写类名（部分 ROM 用 .AutoClickService）
+        val full = "${packageName}/${AutoClickService::class.java.name}"
+        val short = "${packageName}/.AutoClickService"
+        val raw = Settings.Secure.getString(
             contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
-        return enabledServices.split(":").any { it.equals(service, ignoreCase = true) }
+        // 直接用 contains，不管 ROM 用什么分隔符/顺序
+        return raw.contains(full, ignoreCase = true) || raw.contains(short, ignoreCase = true)
     }
 
     private fun updateServiceStatus() {
