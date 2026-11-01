@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout
+<ScrollView
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
+    android:layout_height="match_parent">
+
+<LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
     android:gravity="center"
     android:orientation="vertical"
     android:padding="24dp">
@@ -75,7 +79,7 @@
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:layout_marginBottom="16dp">
+            android:layout_marginBottom="12dp">
 
             <TextView
                 android:layout_width="80dp"
@@ -103,12 +107,46 @@
                 android:gravity="center" />
         </LinearLayout>
 
+        <!-- 屏蔽关键词 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="4dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="🚫 屏蔽关键词"
+                android:textSize="14sp"
+                android:textColor="#555555"
+                android:layout_marginBottom="8dp" />
+
+            <EditText
+                android:id="@+id/etBlockKeywords"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:inputType="text"
+                android:hint="医院, 学校, 火车站, 机场"
+                android:padding="12dp"
+                android:background="@android:drawable/edit_text" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="起点或终点包含任一关键词则禁止抢单，用逗号/空格分隔"
+                android:textSize="11sp"
+                android:textColor="#999999"
+                android:layout_marginTop="4dp" />
+        </LinearLayout>
+
         <!-- 保存按钮 -->
         <Button
             android:id="@+id/btnSave"
             android:layout_width="match_parent"
             android:layout_height="48dp"
-            android:text="保存设置" />
+            android:text="保存设置"
+            android:layout_marginTop="16dp" />
     </LinearLayout>
 
     <!-- 开启服务 -->
@@ -129,3 +167,4 @@
         android:gravity="center" />
 
 </LinearLayout>
+</ScrollView>

@@ -17,15 +17,18 @@ class MainActivity : AppCompatActivity() {
         const val PREFS_NAME = "grab_settings"
         const val KEY_MIN_AMOUNT = "min_amount"
         const val KEY_MAX_DISTANCE = "max_distance"
+        const val KEY_BLOCK_KEYWORDS = "block_keywords"
 
         const val DEFAULT_MIN_AMOUNT = 20f
         const val DEFAULT_MAX_DISTANCE = 5f
+        const val DEFAULT_BLOCK_KEYWORDS = ""
     }
 
     private lateinit var prefs: SharedPreferences
     private lateinit var tvStatus: TextView
     private lateinit var etMinAmount: EditText
     private lateinit var etMaxDistance: EditText
+    private lateinit var etBlockKeywords: EditText
     private lateinit var btnSave: Button
     private lateinit var btnOpenScript: Button
 
@@ -38,12 +41,11 @@ class MainActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvStatus)
         etMinAmount = findViewById(R.id.etMinAmount)
         etMaxDistance = findViewById(R.id.etMaxDistance)
+        etBlockKeywords = findViewById(R.id.etBlockKeywords)
         btnSave = findViewById(R.id.btnSave)
         btnOpenScript = findViewById(R.id.btnOpenScript)
 
-        // 回显已保存的值
         loadPrefs()
-
         updateServiceStatus()
 
         btnSave.setOnClickListener { savePrefs() }
@@ -58,8 +60,10 @@ class MainActivity : AppCompatActivity() {
     private fun loadPrefs() {
         val amount = prefs.getFloat(KEY_MIN_AMOUNT, DEFAULT_MIN_AMOUNT)
         val distance = prefs.getFloat(KEY_MAX_DISTANCE, DEFAULT_MAX_DISTANCE)
+        val keywords = prefs.getString(KEY_BLOCK_KEYWORDS, DEFAULT_BLOCK_KEYWORDS) ?: ""
         etMinAmount.setText(formatFloat(amount))
         etMaxDistance.setText(formatFloat(distance))
+        etBlockKeywords.setText(keywords)
     }
 
     private fun savePrefs() {
@@ -81,6 +85,7 @@ class MainActivity : AppCompatActivity() {
         prefs.edit()
             .putFloat(KEY_MIN_AMOUNT, amount)
             .putFloat(KEY_MAX_DISTANCE, dist)
+            .putString(KEY_BLOCK_KEYWORDS, etBlockKeywords.text.toString().trim())
             .apply()
 
         Toast.makeText(this, "设置已保存 ✅", Toast.LENGTH_SHORT).show()

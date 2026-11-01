@@ -12,16 +12,16 @@ import android.view.accessibility.AccessibilityNodeInfo
 import java.util.regex.Pattern
 
 /**
- * 自动抢单无障碍服务 — 带筛选逻辑
+ * 自动抢单无障碍服务 — 完整筛选逻辑
  *
- * 执行顺序：
- *   1. 屏幕出现「确认抢单」→ 开始解析订单信息
- *   2. 从屏幕提取金额（如 "20元"）和距离（如 "5公里"）
- *   3. 跟用户设定的最低金额 / 最远距离对比
- *   4. 满足条件 → 自动点击
- *   5. 出现「是否确认抢单」弹窗 → 自动点「确定」
+ * 执行顺序（短路优先）：
+ *   1. 弹窗「是否确认抢单」→ 自动点「确定」
+ *   2. 屏幕出现「确认抢单」→ 扫描订单信息
+ *   3. 关键词屏蔽：起点/终点包含屏蔽词 → ❌ 跳过
+ *   4. 金额 >= 最低金额 且 距离 <= 最远距离 → ✅ 点击
  *
- * 解析方式：遍历 AccessibilityNodeInfo 树，用正则匹配 "数字+元" / "数字+公里"
+ * 解析方式：BFS 遍历 AccessibilityNodeInfo 树，
+ * 正则匹配 "数字+元" / "数字+公里" / 全屏文字做关键词匹配
  */
 class AutoClickService : AccessibilityService() {
 
@@ -33,16 +33,16 @@ class AutoClickService : AccessibilityService() {
         private const val TEXT_CONFIRM_DIALOG = "是否确认抢单"
         private const val TEXT_CONFIRM_BTN = "确定"
 
-        // ── 正则：从文字里抠数值 ──
-        // "预计收入20元" / "20元" / "¥20.5" / "20.5元" → 20.5
+        // ── 正则 ──
+        // "预计收入20元" / "20元" / "¥20.5" → 20.5
         private val REGEX_AMOUNT = Pattern.compile("""(\d+\.?\d*)\s*[元¥]""")
-        // "5公里" / "接驾5公里" / "距离5km" / "5.3km" → 5.3
+        // "5公里" / "接驾5公里" / "5.3km" → 5.3
         private val REGEX_DISTANCE = Pattern.compile("""(\d+\.?\d*)\s*(公里|km)""", Pattern.CASE_INSENSITIVE)
 
-        // 最多扫描节点数（防止超大页面卡死）
+        // BFS 扫描上限
         private const val MAX_SCAN_NODES = 2000
 
-        // 防抖间隔
+        // 防抖
         private const val DEBOUNCE_MS = 2000L
 
         @Volatile
@@ -53,10 +53,10 @@ class AutoClickService : AccessibilityService() {
     private lateinit var prefs: SharedPreferences
     private var minAmount = MainActivity.DEFAULT_MIN_AMOUNT
     private var maxDistance = MainActivity.DEFAULT_MAX_DISTANCE
+    private var blockKeywords = emptyList<String>()
 
     private var lastClickTime = 0L
     private var lastWindowId = -1
-    // 本次订单的解析值
     private var orderAmount = 0f
     private var orderDistance = 0f
 
@@ -67,7 +67,7 @@ class AutoClickService : AccessibilityService() {
         instance = this
         prefs = getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)
         reloadPrefs()
-        Log.i(TAG, "服务连接 — 最低金额:${minAmount}元  接驾≤${maxDistance}公里")
+        Log.i(TAG, "服务连接 — 最低:${minAmount}元  距离≤${maxDistance}公里  屏蔽:${blockKeywords.size}个")
 
         serviceInfo = AccessibilityServiceInfo().apply {
             eventTypes = AccessibilityEvent.TYPES_ALL_MASK
@@ -79,10 +79,17 @@ class AutoClickService : AccessibilityService() {
         }
     }
 
-    /** 每次事件触发时重新读配置（用户可能改了设置） */
+    /** 每次事件触发重新读配置 */
     private fun reloadPrefs() {
         minAmount = prefs.getFloat(MainActivity.KEY_MIN_AMOUNT, MainActivity.DEFAULT_MIN_AMOUNT)
         maxDistance = prefs.getFloat(MainActivity.KEY_MAX_DISTANCE, MainActivity.DEFAULT_MAX_DISTANCE)
+
+        val raw = prefs.getString(MainActivity.KEY_BLOCK_KEYWORDS, MainActivity.DEFAULT_BLOCK_KEYWORDS) ?: ""
+        // 逗号、中文逗号、空格 做分隔，过滤空串
+        blockKeywords = raw
+            .split(Regex("""[，,\s]+"""))
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -97,38 +104,55 @@ class AutoClickService : AccessibilityService() {
         }
     }
 
-    // ── 主流程 ─────────────────────────────────────────────────
+    // ═══════════════ 主流程 ═══════════════════════════════════
 
     private fun process(root: AccessibilityNodeInfo) {
-        // 刷新配置
         reloadPrefs()
 
-        // ═══ 第一步：弹窗 "是否确认抢单" ═══
-        val dialogNode = root.findAccessibilityNodeInfosByText(TEXT_CONFIRM_DIALOG)
-        if (dialogNode.isNotEmpty()) {
+        // ── 第一步：弹窗确认 ──
+        if (root.findAccessibilityNodeInfosByText(TEXT_CONFIRM_DIALOG).isNotEmpty()) {
             Log.d(TAG, "📋 弹窗: $TEXT_CONFIRM_DIALOG")
-            val okNode = findClickableByText(root, TEXT_CONFIRM_BTN)
-            if (okNode != null) {
-                Log.d(TAG, "✅ 弹窗确定 → 点击金额=${orderAmount}元 距离=${orderDistance}公里")
-                clickNode(okNode)
+            findClickableByText(root, TEXT_CONFIRM_BTN)?.let {
+                Log.d(TAG, "✅ 弹窗确定 → 金额=${orderAmount}元 距离=${orderDistance}公里")
+                clickNode(it)
             }
             return
         }
 
-        // ═══ 第二步：查找 "确认抢单" 按钮 ═══
+        // ── 第二步：查找「确认抢单」按钮 ──
         val grabNode = findClickableByText(root, TEXT_CONFIRM_GRAB) ?: return
 
-        // ═══ 第三步：全屏扫描，提取金额和距离 ═══
-        orderAmount = scanAmount(root)
-        orderDistance = scanDistance(root)
+        // ── 第三步：全屏提取订单信息 ──
+        // 一次 BFS 同时收集：金额、距离、全屏文字（给关键词匹配用）
+        val scan = ScreenScan()
+        bfsCollect(root, scan)
+
+        orderAmount = scan.bestAmount
+        orderDistance = scan.bestDistance
+        val allText = scan.allTextSb.toString()
 
         Log.i(TAG, "══════ 订单 ══════")
-        Log.i(TAG, "  金额: ${orderAmount}元  (最低要求: ${minAmount}元)")
-        Log.i(TAG, "  距离: ${orderDistance}公里  (最远允许: ${maxDistance}公里)")
+        Log.i(TAG, "  金额: ${orderAmount}元  (最低: ${minAmount}元)")
+        Log.i(TAG, "  距离: ${orderDistance}公里  (最远: ${maxDistance}公里)")
+        if (blockKeywords.isNotEmpty()) {
+            Log.i(TAG, "  屏蔽词: [${blockKeywords.joinToString(", ")}]")
+        }
 
-        // ═══ 第四步：筛选判断 ═══
+        // ═══ 第四步：关键词屏蔽 ═══
+        //   全屏文本中是否包含任一屏蔽词
+        //   「起点」和「终点」均为全屏文本的子集，
+        //   不管 app 怎么布局，只要文字出现过就会被命中
+        if (blockKeywords.isNotEmpty()) {
+            for (kw in blockKeywords) {
+                if (allText.contains(kw, ignoreCase = true)) {
+                    Log.i(TAG, "❌ 跳过: 屏蔽关键词「$kw」命中")
+                    return
+                }
+            }
+        }
+
+        // ═══ 第五步：金额 + 距离筛选 ═══
         if (orderAmount <= 0f || orderDistance <= 0f) {
-            // 没解析出来 → 谨慎起见不抢
             Log.w(TAG, "❌ 跳过: 未能解析金额或距离")
             return
         }
@@ -147,94 +171,76 @@ class AutoClickService : AccessibilityService() {
         clickNode(grabNode)
     }
 
-    // ── 屏幕扫描：金额 ─────────────────────────────────────────
+    // ═══════════════ BFS 扫描 ═════════════════════════════════
 
     /**
-     * 遍历节点树，用正则匹配所有包含 "数字+元" 的文字，
-     * 取最大金额（因为"确认抢单"按钮附近可能还有预估收入等文本）
-     *
-     * 你也可以改成取第一条匹配 or 取「预计收入」后第一个金额
-     * 取决于实际 App 布局——下面两种策略都有
+     * 一次 BFS 同时收集：
+     *   - bestAmount: 最大金额
+     *   - bestDistance: 最小距离
+     *   - allText: 所有节点的文本（用空格连接，用于关键词匹配）
      */
-    private fun scanAmount(root: AccessibilityNodeInfo): Float {
-        var best = 0f
-        var scanCount = 0
-
-        // 策略一：遍历所有节点，正则匹配
+    private fun bfsCollect(root: AccessibilityNodeInfo, scan: ScreenScan) {
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
-        while (queue.isNotEmpty() && scanCount < MAX_SCAN_NODES) {
-            val node = queue.removeFirst()
-            scanCount++
+        var depth = 0
 
-            val text = node.text?.toString() ?: ""
-            val contentDesc = node.contentDescription?.toString() ?: ""
+        while (queue.isNotEmpty() && scan.nodeCount < MAX_SCAN_NODES) {
+            val len = queue.size
+            repeat(len) {
+                if (queue.isEmpty()) return
+                val node = queue.removeFirst()
+                scan.nodeCount++
 
-            for (t in listOf(text, contentDesc)) {
-                if (t.isBlank()) continue
-                val m = REGEX_AMOUNT.matcher(t)
-                while (m.find()) {
-                    val v = m.group(1)?.toFloatOrNull() ?: continue
-                    if (v > best) best = v
+                val text = node.text?.toString()?.trim() ?: ""
+                val desc = node.contentDescription?.toString()?.trim() ?: ""
+
+                for (t in listOf(text, desc)) {
+                    if (t.isEmpty()) continue
+
+                    // 收集全文本
+                    scan.allTextSb.append(t).append(' ')
+
+                    // 匹配金额
+                    val am = REGEX_AMOUNT.matcher(t)
+                    while (am.find()) {
+                        val v = am.group(1)?.toFloatOrNull() ?: continue
+                        if (v > scan.bestAmount) scan.bestAmount = v
+                    }
+
+                    // 匹配距离
+                    val dm = REGEX_DISTANCE.matcher(t)
+                    while (dm.find()) {
+                        val v = dm.group(1)?.toFloatOrNull() ?: continue
+                        if (v < scan.bestDistance) scan.bestDistance = v
+                    }
+                }
+
+                for (i in 0 until node.childCount) {
+                    node.getChild(i)?.let { queue.add(it) }
                 }
             }
-
-            for (i in 0 until node.childCount) {
-                node.getChild(i)?.let { queue.add(it) }
-            }
+            depth++
         }
 
-        if (best > 0f) Log.d(TAG, "  解析金额: $best 元 (扫描 $scanCount 个节点)")
-        return best
+        if (scan.bestAmount > 0f) Log.d(TAG, "  解析金额: ${scan.bestAmount}元 (扫${scan.nodeCount}节点)")
+        if (scan.bestDistance != Float.MAX_VALUE) Log.d(TAG, "  解析距离: ${scan.bestDistance}公里 (扫${scan.nodeCount}节点)")
     }
 
-    // ── 屏幕扫描：距离 ─────────────────────────────────────────
+    /** 一次扫描的结果容器，避免 BFS 方法里多个返回值 */
+    private class ScreenScan {
+        var bestAmount = 0f
+        var bestDistance = Float.MAX_VALUE
+        var nodeCount = 0
+        val allTextSb = StringBuilder()
 
-    /**
-     * 提取接驾距离（最小距离，取最短接驾）
-     *
-     * 正则匹配 "数字+公里/km"，取最小值
-     * 因为屏幕上可能同时有起点距离、终点距离、接驾距离
-     */
-    private fun scanDistance(root: AccessibilityNodeInfo): Float {
-        var best = Float.MAX_VALUE
-        var scanCount = 0
-
-        val queue = ArrayDeque<AccessibilityNodeInfo>()
-        queue.add(root)
-        while (queue.isNotEmpty() && scanCount < MAX_SCAN_NODES) {
-            val node = queue.removeFirst()
-            scanCount++
-
-            val text = node.text?.toString() ?: ""
-            val contentDesc = node.contentDescription?.toString() ?: ""
-
-            for (t in listOf(text, contentDesc)) {
-                if (t.isBlank()) continue
-                val m = REGEX_DISTANCE.matcher(t)
-                while (m.find()) {
-                    val v = m.group(1)?.toFloatOrNull() ?: continue
-                    if (v < best) best = v
-                }
-            }
-
-            for (i in 0 until node.childCount) {
-                node.getChild(i)?.let { queue.add(it) }
-            }
-        }
-
-        val result = if (best == Float.MAX_VALUE) 0f else best
-        if (result > 0f) Log.d(TAG, "  解析距离: $result 公里 (扫描 $scanCount 个节点)")
-        return result
+        val bestDistanceOrZero: Float get() = if (bestDistance == Float.MAX_VALUE) 0f else bestDistance
     }
 
     // ── 节点查找 ───────────────────────────────────────────────
 
     private fun findClickableByText(root: AccessibilityNodeInfo, text: String): AccessibilityNodeInfo? {
         val matches = root.findAccessibilityNodeInfosByText(text)
-        // 先看直接可点击
         matches.firstOrNull { it.isClickable }?.let { return it }
-        // 再看可点击父节点
         for (m in matches) {
             findClickableAncestor(m)?.let { return it }
         }
@@ -250,13 +256,12 @@ class AutoClickService : AccessibilityService() {
         return null
     }
 
-    // ── 手势点击 ───────────────────────────────────────────────
+    // ── 点击 ───────────────────────────────────────────────────
 
     private fun clickNode(node: AccessibilityNodeInfo) {
         val now = System.currentTimeMillis()
         val wid = node.windowId
 
-        // 同一个窗口 2 秒内不重复处理
         if (wid == lastWindowId && now - lastClickTime < DEBOUNCE_MS) {
             Log.d(TAG, "⏳ 防抖跳过")
             return
@@ -264,7 +269,7 @@ class AutoClickService : AccessibilityService() {
         lastClickTime = now
         lastWindowId = wid
 
-        // 语义点击优先
+        // 语义点击
         if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
             Log.d(TAG, "✅ ACTION_CLICK")
             return
