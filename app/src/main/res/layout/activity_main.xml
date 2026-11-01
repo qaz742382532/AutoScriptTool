@@ -7,6 +7,7 @@
     android:orientation="vertical"
     android:padding="24dp">
 
+    <!-- 服务状态 -->
     <TextView
         android:id="@+id/tvStatus"
         android:layout_width="wrap_content"
@@ -16,6 +17,101 @@
         android:textColor="#666666"
         android:layout_marginBottom="24dp" />
 
+    <!-- 筛选设置卡片 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="#F5F5F5"
+        android:padding="20dp"
+        android:layout_marginBottom="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="📋 抢单筛选条件"
+            android:textSize="16sp"
+            android:textColor="#333333"
+            android:textStyle="bold"
+            android:layout_marginBottom="16dp" />
+
+        <!-- 最低金额 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="80dp"
+                android:layout_height="wrap_content"
+                android:text="最低金额"
+                android:textSize="14sp"
+                android:textColor="#555555" />
+
+            <EditText
+                android:id="@+id/etMinAmount"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:inputType="numberDecimal"
+                android:hint="例如 20"
+                android:padding="12dp"
+                android:background="@android:drawable/edit_text" />
+
+            <TextView
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="元"
+                android:textSize="14sp"
+                android:textColor="#555555"
+                android:gravity="center" />
+        </LinearLayout>
+
+        <!-- 最远接驾距离 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="16dp">
+
+            <TextView
+                android:layout_width="80dp"
+                android:layout_height="wrap_content"
+                android:text="接驾距离 ≤"
+                android:textSize="14sp"
+                android:textColor="#555555" />
+
+            <EditText
+                android:id="@+id/etMaxDistance"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:inputType="numberDecimal"
+                android:hint="例如 5"
+                android:padding="12dp"
+                android:background="@android:drawable/edit_text" />
+
+            <TextView
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="公里"
+                android:textSize="14sp"
+                android:textColor="#555555"
+                android:gravity="center" />
+        </LinearLayout>
+
+        <!-- 保存按钮 -->
+        <Button
+            android:id="@+id/btnSave"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:text="保存设置" />
+    </LinearLayout>
+
+    <!-- 开启服务 -->
     <Button
         android:id="@+id/btnOpenScript"
         android:layout_width="200dp"

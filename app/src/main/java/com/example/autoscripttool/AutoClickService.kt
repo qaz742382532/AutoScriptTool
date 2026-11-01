@@ -3,234 +3,297 @@ package com.example.autoscripttool
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
-import android.annotation.SuppressLint
+import android.content.SharedPreferences
 import android.graphics.Path
 import android.graphics.Rect
-import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import java.util.regex.Pattern
 
 /**
- * 自动抢单无障碍服务
+ * 自动抢单无障碍服务 — 带筛选逻辑
  *
- * 监听首汽约车司机端 (com.ichinait.gbdriver) 的订单窗口，
- * 根据起点/终点距离和用车时间类型判断是否抢单，自动模拟点击。
+ * 执行顺序：
+ *   1. 屏幕出现「确认抢单」→ 开始解析订单信息
+ *   2. 从屏幕提取金额（如 "20元"）和距离（如 "5公里"）
+ *   3. 跟用户设定的最低金额 / 最远距离对比
+ *   4. 满足条件 → 自动点击
+ *   5. 出现「是否确认抢单」弹窗 → 自动点「确定」
+ *
+ * 解析方式：遍历 AccessibilityNodeInfo 树，用正则匹配 "数字+元" / "数字+公里"
  */
-@SuppressLint("NewApi")
 class AutoClickService : AccessibilityService() {
 
     companion object {
         private const val TAG = "AutoScriptTool"
+
+        // ── 目标文字 ──
+        private const val TEXT_CONFIRM_GRAB = "确认抢单"
+        private const val TEXT_CONFIRM_DIALOG = "是否确认抢单"
+        private const val TEXT_CONFIRM_BTN = "确定"
+
+        // ── 正则：从文字里抠数值 ──
+        // "预计收入20元" / "20元" / "¥20.5" / "20.5元" → 20.5
+        private val REGEX_AMOUNT = Pattern.compile("""(\d+\.?\d*)\s*[元¥]""")
+        // "5公里" / "接驾5公里" / "距离5km" / "5.3km" → 5.3
+        private val REGEX_DISTANCE = Pattern.compile("""(\d+\.?\d*)\s*(公里|km)""", Pattern.CASE_INSENSITIVE)
+
+        // 最多扫描节点数（防止超大页面卡死）
+        private const val MAX_SCAN_NODES = 2000
+
+        // 防抖间隔
+        private const val DEBOUNCE_MS = 2000L
 
         @Volatile
         var instance: AutoClickService? = null
             private set
     }
 
-    // ── 订单状态 ───────────────────────────────────────────────
+    private lateinit var prefs: SharedPreferences
+    private var minAmount = MainActivity.DEFAULT_MIN_AMOUNT
+    private var maxDistance = MainActivity.DEFAULT_MAX_DISTANCE
 
-    private var topType = ""          // 用车时间类型（即时用车 / 预约等）
-    private var startDistance = ""    // 起点距离
-    private var endDistance = ""      // 终点距离
-    private var startAddress = ""     // 起点地址
-    private var endAddress = ""       // 终点地址
-
-    // "抢"按钮的屏幕坐标
-    private var tapCenterX = 0
-    private var tapCenterY = 0
-
-    // 状态机：防止同一订单重复处理
-    private var hasProcessed = false
+    private var lastClickTime = 0L
+    private var lastWindowId = -1
+    // 本次订单的解析值
+    private var orderAmount = 0f
+    private var orderDistance = 0f
 
     // ── 生命周期 ───────────────────────────────────────────────
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        Log.d(TAG, "服务已连接")
+        prefs = getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)
+        reloadPrefs()
+        Log.i(TAG, "服务连接 — 最低金额:${minAmount}元  接驾≤${maxDistance}公里")
 
-        val info = AccessibilityServiceInfo().apply {
+        serviceInfo = AccessibilityServiceInfo().apply {
             eventTypes = AccessibilityEvent.TYPES_ALL_MASK
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
                     AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                     AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                flags = flags or AccessibilityServiceInfo.FLAG_REQUEST_2_FINGER_PASSTHROUGH
-            }
             notificationTimeout = 100
         }
-        setServiceInfo(info)
+    }
+
+    /** 每次事件触发时重新读配置（用户可能改了设置） */
+    private fun reloadPrefs() {
+        minAmount = prefs.getFloat(MainActivity.KEY_MIN_AMOUNT, MainActivity.DEFAULT_MIN_AMOUNT)
+        maxDistance = prefs.getFloat(MainActivity.KEY_MAX_DISTANCE, MainActivity.DEFAULT_MAX_DISTANCE)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        if (event == null) return
+        val root = rootInActiveWindow ?: return
 
-        val source = event.source ?: return
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                process(root)
+            }
+        }
+    }
 
-        // ── 查找"抢"按钮 ──
-        val robNodes = source.findAccessibilityNodeInfosByViewId(
-            "com.ichinait.gbdriver:id/tv_scramble_order"
-        )
-        if (robNodes.isEmpty()) return
+    // ── 主流程 ─────────────────────────────────────────────────
 
-        val robNode = robNodes.firstOrNull { it.text == "抢" } ?: return
+    private fun process(root: AccessibilityNodeInfo) {
+        // 刷新配置
+        reloadPrefs()
 
-        // 同一窗口只处理一次
-        if (hasProcessed) return
-        hasProcessed = true
+        // ═══ 第一步：弹窗 "是否确认抢单" ═══
+        val dialogNode = root.findAccessibilityNodeInfosByText(TEXT_CONFIRM_DIALOG)
+        if (dialogNode.isNotEmpty()) {
+            Log.d(TAG, "📋 弹窗: $TEXT_CONFIRM_DIALOG")
+            val okNode = findClickableByText(root, TEXT_CONFIRM_BTN)
+            if (okNode != null) {
+                Log.d(TAG, "✅ 弹窗确定 → 点击金额=${orderAmount}元 距离=${orderDistance}公里")
+                clickNode(okNode)
+            }
+            return
+        }
 
-        Log.d(TAG, "══════════ 新订单 ══════════")
+        // ═══ 第二步：查找 "确认抢单" 按钮 ═══
+        val grabNode = findClickableByText(root, TEXT_CONFIRM_GRAB) ?: return
 
-        // ── 解析"抢"按钮坐标 ──
+        // ═══ 第三步：全屏扫描，提取金额和距离 ═══
+        orderAmount = scanAmount(root)
+        orderDistance = scanDistance(root)
+
+        Log.i(TAG, "══════ 订单 ══════")
+        Log.i(TAG, "  金额: ${orderAmount}元  (最低要求: ${minAmount}元)")
+        Log.i(TAG, "  距离: ${orderDistance}公里  (最远允许: ${maxDistance}公里)")
+
+        // ═══ 第四步：筛选判断 ═══
+        if (orderAmount <= 0f || orderDistance <= 0f) {
+            // 没解析出来 → 谨慎起见不抢
+            Log.w(TAG, "❌ 跳过: 未能解析金额或距离")
+            return
+        }
+
+        if (orderAmount < minAmount) {
+            Log.i(TAG, "❌ 跳过: 金额${orderAmount}元 < 最低${minAmount}元")
+            return
+        }
+
+        if (orderDistance > maxDistance) {
+            Log.i(TAG, "❌ 跳过: 距离${orderDistance}公里 > 最远${maxDistance}公里")
+            return
+        }
+
+        Log.i(TAG, "✅ 满足条件 → 抢单！")
+        clickNode(grabNode)
+    }
+
+    // ── 屏幕扫描：金额 ─────────────────────────────────────────
+
+    /**
+     * 遍历节点树，用正则匹配所有包含 "数字+元" 的文字，
+     * 取最大金额（因为"确认抢单"按钮附近可能还有预估收入等文本）
+     *
+     * 你也可以改成取第一条匹配 or 取「预计收入」后第一个金额
+     * 取决于实际 App 布局——下面两种策略都有
+     */
+    private fun scanAmount(root: AccessibilityNodeInfo): Float {
+        var best = 0f
+        var scanCount = 0
+
+        // 策略一：遍历所有节点，正则匹配
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        while (queue.isNotEmpty() && scanCount < MAX_SCAN_NODES) {
+            val node = queue.removeFirst()
+            scanCount++
+
+            val text = node.text?.toString() ?: ""
+            val contentDesc = node.contentDescription?.toString() ?: ""
+
+            for (t in listOf(text, contentDesc)) {
+                if (t.isBlank()) continue
+                val m = REGEX_AMOUNT.matcher(t)
+                while (m.find()) {
+                    val v = m.group(1)?.toFloatOrNull() ?: continue
+                    if (v > best) best = v
+                }
+            }
+
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+
+        if (best > 0f) Log.d(TAG, "  解析金额: $best 元 (扫描 $scanCount 个节点)")
+        return best
+    }
+
+    // ── 屏幕扫描：距离 ─────────────────────────────────────────
+
+    /**
+     * 提取接驾距离（最小距离，取最短接驾）
+     *
+     * 正则匹配 "数字+公里/km"，取最小值
+     * 因为屏幕上可能同时有起点距离、终点距离、接驾距离
+     */
+    private fun scanDistance(root: AccessibilityNodeInfo): Float {
+        var best = Float.MAX_VALUE
+        var scanCount = 0
+
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        while (queue.isNotEmpty() && scanCount < MAX_SCAN_NODES) {
+            val node = queue.removeFirst()
+            scanCount++
+
+            val text = node.text?.toString() ?: ""
+            val contentDesc = node.contentDescription?.toString() ?: ""
+
+            for (t in listOf(text, contentDesc)) {
+                if (t.isBlank()) continue
+                val m = REGEX_DISTANCE.matcher(t)
+                while (m.find()) {
+                    val v = m.group(1)?.toFloatOrNull() ?: continue
+                    if (v < best) best = v
+                }
+            }
+
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+
+        val result = if (best == Float.MAX_VALUE) 0f else best
+        if (result > 0f) Log.d(TAG, "  解析距离: $result 公里 (扫描 $scanCount 个节点)")
+        return result
+    }
+
+    // ── 节点查找 ───────────────────────────────────────────────
+
+    private fun findClickableByText(root: AccessibilityNodeInfo, text: String): AccessibilityNodeInfo? {
+        val matches = root.findAccessibilityNodeInfosByText(text)
+        // 先看直接可点击
+        matches.firstOrNull { it.isClickable }?.let { return it }
+        // 再看可点击父节点
+        for (m in matches) {
+            findClickableAncestor(m)?.let { return it }
+        }
+        return null
+    }
+
+    private fun findClickableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var cur: AccessibilityNodeInfo? = node.parent
+        while (cur != null) {
+            if (cur.isClickable) return cur
+            cur = cur.parent
+        }
+        return null
+    }
+
+    // ── 手势点击 ───────────────────────────────────────────────
+
+    private fun clickNode(node: AccessibilityNodeInfo) {
+        val now = System.currentTimeMillis()
+        val wid = node.windowId
+
+        // 同一个窗口 2 秒内不重复处理
+        if (wid == lastWindowId && now - lastClickTime < DEBOUNCE_MS) {
+            Log.d(TAG, "⏳ 防抖跳过")
+            return
+        }
+        lastClickTime = now
+        lastWindowId = wid
+
+        // 语义点击优先
+        if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            Log.d(TAG, "✅ ACTION_CLICK")
+            return
+        }
+
+        // 手势兜底
         val bounds = Rect()
-        robNode.getBoundsInScreen(bounds)
-        tapCenterX = bounds.centerX()
-        tapCenterY = bounds.centerY()
-
-        // ── 读取用车时间类型 ──
-        source.findAccessibilityNodeInfosByViewId(
-            "com.ichinait.gbdriver:id/tv_rob_top_type"
-        ).firstOrNull()?.let {
-            topType = it.text?.toString() ?: ""
-            Log.d(TAG, "用车时间: $topType")
+        node.getBoundsInScreen(bounds)
+        if (bounds.width() > 0 && bounds.height() > 0) {
+            val cx = bounds.centerX()
+            val cy = bounds.centerY()
+            val path = Path().apply { moveTo(cx.toFloat(), cy.toFloat()) }
+            dispatchGesture(
+                GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0L, 100L))
+                    .build(),
+                null, null
+            )
+            Log.d(TAG, "✅ GESTURE_CLICK ($cx, $cy)")
         }
-
-        // ── 读取起点地址 ──
-        source.findAccessibilityNodeInfosByViewId(
-            "com.ichinait.gbdriver:id/tv_rob_start_address"
-        ).firstOrNull()?.let {
-            startAddress = it.text?.toString() ?: ""
-            Log.d(TAG, "起点: $startAddress")
-        }
-
-        // ── 读取终点地址 ──
-        source.findAccessibilityNodeInfosByViewId(
-            "com.ichinait.gbdriver:id/tv_rob_end_address"
-        ).firstOrNull()?.let {
-            endAddress = it.text?.toString() ?: ""
-            Log.d(TAG, "终点: $endAddress")
-        }
-
-        // ── 读取起点距离 ──
-        source.findAccessibilityNodeInfosByViewId(
-            "com.ichinait.gbdriver:id/tv_rob_start_distance"
-        ).firstOrNull()?.let { node ->
-            val text = node.text?.toString() ?: ""
-            if (text != "···") {
-                startDistance = text
-                Log.d(TAG, "起点距离: $startDistance")
-            }
-        }
-
-        // ── 读取终点距离 ──
-        source.findAccessibilityNodeInfosByViewId(
-            "com.ichinait.gbdriver:id/tv_rob_end_distance"
-        ).firstOrNull()?.let { node ->
-            val text = node.text?.toString() ?: ""
-            if (text != "···") {
-                endDistance = text
-                Log.d(TAG, "终点距离: $endDistance")
-            }
-        }
-
-        // ── 抢单判断 ──
-        decideGrab()
-    }
-
-    /**
-     * 根据用车时间和距离条件决定是否抢单
-     */
-    private fun decideGrab() {
-        val startM = kmToM(startDistance)
-        val endM = kmToM(endDistance)
-
-        if (topType == "即时用车") {
-            when {
-                // 起点近 (≤2km) 且 终点远 (≥5km)
-                startM in 0..2000 && endM >= 5000 -> {
-                    Log.d(TAG, "✅ 抢单: 起点近 + 终点远")
-                    tap(tapCenterX, tapCenterY)
-                }
-                // 起点较近 (≤3.5km) 且 终点很远 (≥15km)
-                startM in 0..3500 && endM >= 15000 -> {
-                    Log.d(TAG, "✅ 抢单: 行程远")
-                    tap(tapCenterX, tapCenterY)
-                }
-                else -> {
-                    Log.d(TAG, "❌ 不抢: 距离不满足 (起点${startM}m 终点${endM}m)")
-                    tap(100, 100)
-                }
-            }
-        } else {
-            Log.d(TAG, "❌ 不抢: 非即时用车 ($topType)")
-            tap(100, 100)
-        }
-    }
-
-    // ── 距离解析：xxxxkm → 米 ─────────────────────────────────
-
-    /**
-     * 将类似 "3.5km"、"15km" 的字符串转为米数
-     * 例如: "3.5km" → 3500, "15km" → 15000
-     */
-    private fun kmToM(s: String): Int {
-        if (s.isEmpty()) return 0
-        // 去掉 "km" 后缀
-        val numPart = s.replace("km", "", ignoreCase = true).trim()
-        if (numPart.isEmpty()) return 0
-
-        return try {
-            // "3.5" → 3.5 → 3500
-            (numPart.toFloat() * 1000).toInt()
-        } catch (e: NumberFormatException) {
-            Log.e(TAG, "距离解析失败: $s", e)
-            0
-        }
-    }
-
-    // ── 手势：点击 / 滑动 ─────────────────────────────────────
-
-    /**
-     * 在屏幕坐标 (x, y) 处执行点击
-     */
-    private fun tap(x: Int, y: Int) {
-        val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0L, 100L))
-            .build()
-        dispatchGesture(gesture, object : GestureResultCallback() {
-            override fun onCompleted(gestureDescription: GestureDescription?) {
-                Log.d(TAG, "点击完成 ($x, $y)")
-            }
-            override fun onCancelled(gestureDescription: GestureDescription?) {
-                Log.e(TAG, "点击取消 ($x, $y)")
-            }
-        }, null)
-    }
-
-    /**
-     * 滑动手势
-     */
-    private fun swipe(xStart: Int, yStart: Int, xEnd: Int, yEnd: Int, durationMs: Long = 300) {
-        val path = Path().apply {
-            moveTo(xStart.toFloat(), yStart.toFloat())
-            lineTo(xEnd.toFloat(), yEnd.toFloat())
-        }
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
-            .build()
-        dispatchGesture(gesture, null, null)
     }
 
     override fun onInterrupt() {
-        Log.d(TAG, "服务中断")
+        Log.w(TAG, "服务中断")
     }
 
     override fun onDestroy() {
         super.onDestroy()
         instance = null
-        Log.d(TAG, "服务销毁")
+        Log.i(TAG, "服务销毁")
     }
 }

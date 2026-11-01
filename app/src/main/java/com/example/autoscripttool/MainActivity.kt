@@ -2,29 +2,52 @@ package com.example.autoscripttool
 
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Button
+import android.widget.EditText
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 
 class MainActivity : AppCompatActivity() {
 
+    companion object {
+        const val PREFS_NAME = "grab_settings"
+        const val KEY_MIN_AMOUNT = "min_amount"
+        const val KEY_MAX_DISTANCE = "max_distance"
+
+        const val DEFAULT_MIN_AMOUNT = 20f
+        const val DEFAULT_MAX_DISTANCE = 5f
+    }
+
+    private lateinit var prefs: SharedPreferences
     private lateinit var tvStatus: TextView
+    private lateinit var etMinAmount: EditText
+    private lateinit var etMaxDistance: EditText
+    private lateinit var btnSave: Button
     private lateinit var btnOpenScript: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
         tvStatus = findViewById(R.id.tvStatus)
+        etMinAmount = findViewById(R.id.etMinAmount)
+        etMaxDistance = findViewById(R.id.etMaxDistance)
+        btnSave = findViewById(R.id.btnSave)
         btnOpenScript = findViewById(R.id.btnOpenScript)
+
+        // 回显已保存的值
+        loadPrefs()
 
         updateServiceStatus()
 
-        btnOpenScript.setOnClickListener {
-            openAccessibilitySettings()
-        }
+        btnSave.setOnClickListener { savePrefs() }
+        btnOpenScript.setOnClickListener { openAccessibilitySettings() }
     }
 
     override fun onResume() {
@@ -32,17 +55,55 @@ class MainActivity : AppCompatActivity() {
         updateServiceStatus()
     }
 
-    /** 检查无障碍服务是否已开启 */
+    private fun loadPrefs() {
+        val amount = prefs.getFloat(KEY_MIN_AMOUNT, DEFAULT_MIN_AMOUNT)
+        val distance = prefs.getFloat(KEY_MAX_DISTANCE, DEFAULT_MAX_DISTANCE)
+        etMinAmount.setText(formatFloat(amount))
+        etMaxDistance.setText(formatFloat(distance))
+    }
+
+    private fun savePrefs() {
+        val amountStr = etMinAmount.text.toString().trim()
+        val distStr = etMaxDistance.text.toString().trim()
+
+        val amount = amountStr.toFloatOrNull()
+        val dist = distStr.toFloatOrNull()
+
+        if (amount == null || amount <= 0) {
+            Toast.makeText(this, "请输入有效的最低金额", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (dist == null || dist <= 0) {
+            Toast.makeText(this, "请输入有效的接驾距离", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        prefs.edit()
+            .putFloat(KEY_MIN_AMOUNT, amount)
+            .putFloat(KEY_MAX_DISTANCE, dist)
+            .apply()
+
+        Toast.makeText(this, "设置已保存 ✅", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun formatFloat(value: Float): String {
+        return if (value == value.toLong().toFloat()) {
+            value.toLong().toString()
+        } else {
+            value.toString()
+        }
+    }
+
+    // ── 状态 ───────────────────────────────────────────────────
+
     private fun isAccessibilityServiceEnabled(): Boolean {
         val service = "${packageName}/${AutoClickService::class.java.name}"
         val enabledServices = Settings.Secure.getString(
-            contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
         return enabledServices.split(":").any { it.equals(service, ignoreCase = true) }
     }
 
-    /** 更新界面的服务状态 */
     private fun updateServiceStatus() {
         if (isAccessibilityServiceEnabled()) {
             tvStatus.text = getString(R.string.status_service_on)
@@ -53,9 +114,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 跳转到系统无障碍设置页面 */
     private fun openAccessibilitySettings() {
-        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-        startActivity(intent)
+        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 }
