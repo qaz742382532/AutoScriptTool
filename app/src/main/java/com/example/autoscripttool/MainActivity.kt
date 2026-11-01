@@ -49,7 +49,13 @@ class MainActivity : AppCompatActivity() {
         updateServiceStatus()
 
         btnSave.setOnClickListener { savePrefs() }
-        btnOpenScript.setOnClickListener { openAccessibilitySettings() }
+        btnOpenScript.setOnClickListener {
+            if (isAccessibilityServiceEnabled()) {
+                Toast.makeText(this, "服务已开启，正在监控中 ✅", Toast.LENGTH_SHORT).show()
+            } else {
+                openAccessibilitySettings()
+            }
+        }
     }
 
     override fun onResume() {
